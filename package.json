@@ -1,0 +1,32 @@
+{
+  "name": "op-credential-process",
+  "packageManager": "yarn@4.5.1",
+  "type": "module",
+  "author": {
+    "name": "Jon Scheiding",
+    "url": "https://github.com/jonscheiding"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "lint": "prettier -c src && eslint src",
+    "postinstall": "husky"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "eslint": "^9.13.0",
+    "eslint-plugin-import": "^2.31.0",
+    "husky": "^9.1.6",
+    "lint-staged": "^15.2.10",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.11.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@types/ini": "^4.1.1",
+    "@types/node": "^22.7.7",
+    "globals": "^15.11.0"
+  }
+}
