@@ -5,6 +5,7 @@ import { join } from "path";
 import { Item, item } from "@1password/op-js";
 import { Credentials, STS } from "@aws-sdk/client-sts";
 import { keyBy } from "lodash-es";
+import { lock } from "proper-lockfile";
 import { z } from "zod";
 
 import { Command } from "@commander-js/extra-typings";
@@ -30,6 +31,8 @@ const program = new Command()
   )
   .option("--no-cache", "Do not use cached credentials if they exist.");
 
+const lockFileName = join(tmpdir(), "op-credential-process.lock");
+
 async function index() {
   const options = program.parse(process.argv).opts();
 
@@ -49,31 +52,52 @@ async function index() {
 
   const cacheFileName = join(tmpdir(), `${cacheFileBaseName}.json`);
 
-  try {
-    creds = await readFile(cacheFileName).then((data) =>
-      JSON.parse(data.toString()),
-    );
-    if (creds?.Expiration != null) {
-      const now = new Date();
-      const expiration = new Date(creds.Expiration);
-      if (expiration <= now) {
-        console.log("Credentials expired.");
-        creds = undefined;
+  const release = await lock(lockFileName, {
+    retries: {
+      minTimeout: 100,
+      maxTimeout: 500,
+      retries: 60,
+    },
+  });
+
+  if (options.cache) {
+    try {
+      creds = await readFile(cacheFileName).then((data) =>
+        JSON.parse(data.toString()),
+      );
+      if (creds?.Expiration != null) {
+        const now = new Date();
+        const expiration = new Date(creds.Expiration);
+        if (expiration <= now) {
+          creds = undefined;
+        }
       }
+    } catch {
+      //
+      // Probably cache file does not exist, should validate that though
+      // In the meantime resetting to undefined in case it exists but is corrupted
+      //
+      creds = undefined;
     }
-  } catch {
-    //
-    // Probably cache file does not exist, should validate that though
-    // In the meantime resetting to undefined in case it exists but is corrupted
-    //
-    creds = undefined;
   }
 
-  if (creds == null) {
-    const opResult = item.get(opItem, {
-      account: opAccount,
-      vault: opVault,
-    }) as Item;
+  if (creds != null) {
+    await release();
+  } else {
+    let opResult: Item | undefined;
+
+    try {
+      opResult = item.get(opItem, {
+        account: opAccount,
+        vault: opVault,
+      }) as Item;
+    } finally {
+      await release();
+    }
+
+    if (opResult == null) {
+      throw new Error("Failed to retrieve item from 1Password.");
+    }
 
     const parsed = parseItem(opResult);
 

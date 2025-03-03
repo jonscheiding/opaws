@@ -1365,6 +1365,22 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/proper-lockfile@npm:^4":
+  version: 4.1.4
+  resolution: "@types/proper-lockfile@npm:4.1.4"
+  dependencies:
+    "@types/retry": "npm:*"
+  checksum: 10c0/d597846d6f7860da2470623d3f11b6e5b39864719c3c18b5a5e55f783c5e432fe49dcdcf6341b3903428fdf103f2bdc68eba263ce1ce3cbe8070cbcb54bbf230
+  languageName: node
+  linkType: hard
+
+"@types/retry@npm:*":
+  version: 0.12.5
+  resolution: "@types/retry@npm:0.12.5"
+  checksum: 10c0/eaaca483cc62f2f02c0b8486847ee70986ca7f97afd7363037247dbe3e98df8bd56a5b50d58b1e96768a5a1be0307010d86e9991bd458d72e8df88be471bd720
+  languageName: node
+  linkType: hard
+
 "@typescript-eslint/eslint-plugin@npm:8.11.0":
   version: 8.11.0
   resolution: "@typescript-eslint/eslint-plugin@npm:8.11.0"
@@ -2702,33 +2718,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"gource-multi@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "gource-multi@workspace:."
-  dependencies:
-    "@1password/op-js": "npm:^0.1.13"
-    "@aws-sdk/client-sts": "npm:^3.758.0"
-    "@commander-js/extra-typings": "npm:^13.1.0"
-    "@eslint/js": "npm:^9.13.0"
-    "@types/ini": "npm:^4.1.1"
-    "@types/lodash-es": "npm:^4"
-    "@types/node": "npm:^22.7.7"
-    commander: "npm:^13.1.0"
-    eslint: "npm:^9.13.0"
-    eslint-plugin-import: "npm:^2.31.0"
-    globals: "npm:^15.11.0"
-    husky: "npm:^9.1.6"
-    lint-staged: "npm:^15.2.10"
-    lodash-es: "npm:^4.17.21"
-    prettier: "npm:^3.3.3"
-    tsx: "npm:^4.19.1"
-    typescript: "npm:^5.6.3"
-    typescript-eslint: "npm:^8.11.0"
-    zod: "npm:^3.24.2"
-  languageName: unknown
-  linkType: soft
-
-"graceful-fs@npm:^4.2.6":
+"graceful-fs@npm:^4.2.4, graceful-fs@npm:^4.2.6":
   version: 4.2.11
   resolution: "graceful-fs@npm:4.2.11"
   checksum: 10c0/386d011a553e02bc594ac2ca0bd6d9e4c22d7fa8cfbfc448a6d148c59ea881b092db9dbe3547ae4b88e55f1b01f7c4a2ecc53b310c042793e63aa44cf6c257f2
@@ -3606,6 +3596,34 @@ __metadata:
   languageName: node
   linkType: hard
 
+"op-credential-process@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "op-credential-process@workspace:."
+  dependencies:
+    "@1password/op-js": "npm:^0.1.13"
+    "@aws-sdk/client-sts": "npm:^3.758.0"
+    "@commander-js/extra-typings": "npm:^13.1.0"
+    "@eslint/js": "npm:^9.13.0"
+    "@types/ini": "npm:^4.1.1"
+    "@types/lodash-es": "npm:^4"
+    "@types/node": "npm:^22.7.7"
+    "@types/proper-lockfile": "npm:^4"
+    commander: "npm:^13.1.0"
+    eslint: "npm:^9.13.0"
+    eslint-plugin-import: "npm:^2.31.0"
+    globals: "npm:^15.11.0"
+    husky: "npm:^9.1.6"
+    lint-staged: "npm:^15.2.10"
+    lodash-es: "npm:^4.17.21"
+    prettier: "npm:^3.3.3"
+    proper-lockfile: "npm:^4.1.2"
+    tsx: "npm:^4.19.1"
+    typescript: "npm:^5.6.3"
+    typescript-eslint: "npm:^8.11.0"
+    zod: "npm:^3.24.2"
+  languageName: unknown
+  linkType: soft
+
 "optionator@npm:^0.9.3":
   version: 0.9.4
   resolution: "optionator@npm:0.9.4"
@@ -3754,6 +3772,17 @@ __metadata:
     err-code: "npm:^2.0.2"
     retry: "npm:^0.12.0"
   checksum: 10c0/9c7045a1a2928094b5b9b15336dcd2a7b1c052f674550df63cc3f36cd44028e5080448175b6f6ca32b642de81150f5e7b1a98b728f15cb069f2dd60ac2616b96
+  languageName: node
+  linkType: hard
+
+"proper-lockfile@npm:^4.1.2":
+  version: 4.1.2
+  resolution: "proper-lockfile@npm:4.1.2"
+  dependencies:
+    graceful-fs: "npm:^4.2.4"
+    retry: "npm:^0.12.0"
+    signal-exit: "npm:^3.0.2"
+  checksum: 10c0/2f265dbad15897a43110a02dae55105c04d356ec4ed560723dcb9f0d34bc4fb2f13f79bb930e7561be10278e2314db5aca2527d5d3dcbbdee5e6b331d1571f6d
   languageName: node
   linkType: hard
 
@@ -3971,6 +4000,13 @@ __metadata:
     get-intrinsic: "npm:^1.2.4"
     object-inspect: "npm:^1.13.1"
   checksum: 10c0/d2afd163dc733cc0a39aa6f7e39bf0c436293510dbccbff446733daeaf295857dbccf94297092ec8c53e2503acac30f0b78830876f0485991d62a90e9cad305f
+  languageName: node
+  linkType: hard
+
+"signal-exit@npm:^3.0.2":
+  version: 3.0.7
+  resolution: "signal-exit@npm:3.0.7"
+  checksum: 10c0/25d272fa73e146048565e08f3309d5b942c1979a6f4a58a8c59d5fa299728e9c2fcd1a759ec870863b1fd38653670240cd420dad2ad9330c71f36608a6a1c912
   languageName: node
   linkType: hard
 
