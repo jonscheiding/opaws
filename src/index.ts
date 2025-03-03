@@ -1,3 +1,7 @@
+import { readFile, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+
 import { Item, item } from "@1password/op-js";
 import { Credentials, STS } from "@aws-sdk/client-sts";
 import { keyBy } from "lodash-es";
@@ -23,50 +27,87 @@ const program = new Command()
     "-i, --op-item <op item name>",
     "Specify the OnePassword item name.",
     "AWS Access Key",
-  );
+  )
+  .option("--no-cache", "Do not use cached credentials if they exist.");
 
 async function index() {
   const options = program.parse(process.argv).opts();
 
   const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
 
-  const opResult = item.get(opItem, {
-    account: opAccount,
-    vault: opVault,
-  }) as Item;
-
-  const parsed = parseItem(opResult);
-
-  const sts = new STS({
-    credentials: {
-      accessKeyId: parsed.accessKeyId,
-      secretAccessKey: parsed.secretAccessKey,
-    },
-  });
+  const cacheFileBaseName = sanitizeFilename(
+    [
+      opAccount ?? "default",
+      opVault ?? "default",
+      opItem,
+      roleArn ?? "default",
+      roleSessionName ?? "default",
+    ].join("-"),
+  );
 
   let creds: Credentials | undefined;
 
-  if (roleArn == null) {
-    const response = await sts.getSessionToken({
-      SerialNumber: parsed.mfaSerial,
-      TokenCode: parsed.totp,
+  const cacheFileName = join(tmpdir(), `${cacheFileBaseName}.json`);
+
+  try {
+    creds = await readFile(cacheFileName).then((data) =>
+      JSON.parse(data.toString()),
+    );
+    if (creds?.Expiration != null) {
+      const now = new Date();
+      const expiration = new Date(creds.Expiration);
+      if (expiration <= now) {
+        console.log("Credentials expired.");
+        creds = undefined;
+      }
+    }
+  } catch {
+    //
+    // Probably cache file does not exist, should validate that though
+    // In the meantime resetting to undefined in case it exists but is corrupted
+    //
+    creds = undefined;
+  }
+
+  if (creds == null) {
+    const opResult = item.get(opItem, {
+      account: opAccount,
+      vault: opVault,
+    }) as Item;
+
+    const parsed = parseItem(opResult);
+
+    const sts = new STS({
+      credentials: {
+        accessKeyId: parsed.accessKeyId,
+        secretAccessKey: parsed.secretAccessKey,
+      },
     });
 
-    creds = response.Credentials;
-  } else {
-    const response = await sts.assumeRole({
-      SerialNumber: parsed.mfaSerial,
-      TokenCode: parsed.totp,
-      RoleArn: roleArn,
-      RoleSessionName: roleSessionName,
-    });
+    if (roleArn == null) {
+      const response = await sts.getSessionToken({
+        SerialNumber: parsed.mfaSerial,
+        TokenCode: parsed.totp,
+      });
 
-    creds = response.Credentials;
+      creds = response.Credentials;
+    } else {
+      const response = await sts.assumeRole({
+        SerialNumber: parsed.mfaSerial,
+        TokenCode: parsed.totp,
+        RoleArn: roleArn,
+        RoleSessionName: roleSessionName,
+      });
+
+      creds = response.Credentials;
+    }
   }
 
   if (creds == null) {
     throw new Error("Failed to generate credentials.");
   }
+
+  await writeFile(cacheFileName, JSON.stringify(creds, null, 2));
 
   console.log(
     JSON.stringify(
@@ -124,6 +165,10 @@ function parseItem(item: Item) {
     mfaSerial: undefined,
     totp: undefined,
   };
+}
+
+function sanitizeFilename(filename: string) {
+  return filename.replace(/[/\\?%*:|"<>]/g, "-");
 }
 
 index();
