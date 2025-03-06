@@ -31,26 +31,42 @@ const program = new Command()
   )
   .option("--no-cache", "Do not use cached credentials if they exist.");
 
-const lockFileName = join(tmpdir(), "op-credential-process.lock");
+type Options = ReturnType<typeof program.opts>;
 
-async function index() {
-  const options = program.parse(process.argv).opts();
+type AwsKeys = {
+  accessKeyId: string;
+  secretAccessKey: string;
+} & (
+  | { totp: undefined; mfaSerial: undefined }
+  | { totp: string; mfaSerial: string }
+);
 
+function sanitizeFilename(filename: string) {
+  return filename.replace(/[/\\?%*:|"<>]/g, "-");
+}
+
+function isFileNotFoundError(e: unknown): e is Error & { code: "ENOENT" } {
+  if (!(e instanceof Error)) return false;
+  if (!("code" in e)) return false;
+  return e.code === "ENOENT";
+}
+
+function getCachePath(options: Options) {
   const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
 
-  const cacheFileBaseName = sanitizeFilename(
-    [
-      opAccount ?? "default",
-      opVault ?? "default",
-      opItem,
-      roleArn ?? "default",
-      roleSessionName ?? "default",
-    ].join("-"),
-  );
+  const cacheKey = [
+    opAccount ?? "default",
+    opVault ?? "default",
+    opItem,
+    roleArn ?? "default",
+    roleSessionName ?? "default",
+  ].join("-");
 
-  let creds: Credentials | undefined;
+  return join(tmpdir(), sanitizeFilename(`${cacheKey}.json`));
+}
 
-  const cacheFileName = join(tmpdir(), `${cacheFileBaseName}.json`);
+async function lockInternal() {
+  const lockFileName = join(tmpdir(), "op-credential-process.lock");
 
   const release = await lock(lockFileName, {
     retries: {
@@ -60,93 +76,49 @@ async function index() {
     },
   });
 
-  if (options.cache) {
-    try {
-      creds = await readFile(cacheFileName).then((data) =>
-        JSON.parse(data.toString()),
-      );
-      if (creds?.Expiration != null) {
-        const now = new Date();
-        const expiration = new Date(creds.Expiration);
-        if (expiration <= now) {
-          creds = undefined;
-        }
-      }
-    } catch {
-      //
-      // Probably cache file does not exist, should validate that though
-      // In the meantime resetting to undefined in case it exists but is corrupted
-      //
-      creds = undefined;
-    }
-  }
+  let released = false;
 
-  if (creds != null) {
-    await release();
-  } else {
-    let opResult: Item | undefined;
-
-    try {
-      opResult = item.get(opItem, {
-        account: opAccount,
-        vault: opVault,
-      }) as Item;
-    } finally {
-      await release();
-    }
-
-    if (opResult == null) {
-      throw new Error("Failed to retrieve item from 1Password.");
-    }
-
-    const parsed = parseItem(opResult);
-
-    const sts = new STS({
-      credentials: {
-        accessKeyId: parsed.accessKeyId,
-        secretAccessKey: parsed.secretAccessKey,
-      },
-    });
-
-    if (roleArn == null) {
-      const response = await sts.getSessionToken({
-        SerialNumber: parsed.mfaSerial,
-        TokenCode: parsed.totp,
-      });
-
-      creds = response.Credentials;
-    } else {
-      const response = await sts.assumeRole({
-        SerialNumber: parsed.mfaSerial,
-        TokenCode: parsed.totp,
-        RoleArn: roleArn,
-        RoleSessionName: roleSessionName,
-      });
-
-      creds = response.Credentials;
-    }
-  }
-
-  if (creds == null) {
-    throw new Error("Failed to generate credentials.");
-  }
-
-  await writeFile(cacheFileName, JSON.stringify(creds, null, 2));
-
-  console.log(
-    JSON.stringify(
-      {
-        ...creds,
-        Version: 1,
-      },
-      null,
-      2,
-    ),
-  );
+  return async () => {
+    //
+    // allow double-release to simplify calling code
+    //
+    if (released) return;
+    release();
+    released = true;
+  };
 }
 
-function parseItem(item: Item) {
-  const fields = keyBy(item.fields, "label");
+async function getCachedSessionCredentials(cachePath: string) {
+  try {
+    const creds: Credentials = await readFile(cachePath).then((data) =>
+      JSON.parse(data.toString()),
+    );
+
+    if (creds.Expiration != null) {
+      const now = new Date();
+      const expiration = new Date(creds.Expiration);
+      if (expiration >= now) {
+        return undefined;
+      }
+      return creds;
+    }
+  } catch (e) {
+    if (!isFileNotFoundError(e)) {
+      //
+      // @todo: log this error somewhere
+      //
+    }
+    return undefined;
+  }
+}
+
+function get1pAwsKeys(options: Options): AwsKeys {
+  const opResult = item.get(options.opItem, {
+    account: options.opAccount,
+    vault: options.opVault,
+  }) as Item;
+
+  const fields = keyBy(opResult.fields, "label");
 
   const baseFields = z
     .object({
@@ -191,8 +163,80 @@ function parseItem(item: Item) {
   };
 }
 
-function sanitizeFilename(filename: string) {
-  return filename.replace(/[/\\?%*:|"<>]/g, "-");
+async function getNewSessionCredentials(options: Options, keys: AwsKeys) {
+  const sts = new STS({
+    credentials: {
+      accessKeyId: keys.accessKeyId,
+      secretAccessKey: keys.secretAccessKey,
+    },
+  });
+
+  let creds: Credentials | undefined;
+
+  if (options.roleArn == null) {
+    const response = await sts.getSessionToken({
+      SerialNumber: keys.mfaSerial,
+      TokenCode: keys.totp,
+    });
+
+    creds = response.Credentials;
+  } else {
+    const response = await sts.assumeRole({
+      SerialNumber: keys.mfaSerial,
+      TokenCode: keys.totp,
+      RoleArn: options.roleArn,
+      RoleSessionName: options.roleSessionName,
+    });
+
+    creds = response.Credentials;
+  }
+
+  if (creds == null) {
+    throw new Error(`Failed to generate AWS session credentials.`);
+  }
+
+  return creds;
+}
+
+async function index() {
+  const options = program.parse(process.argv).opts();
+
+  let creds: Credentials | undefined;
+
+  const cachePath = getCachePath(options);
+
+  const release = await lockInternal();
+
+  try {
+    if (options.cache) {
+      creds = await getCachedSessionCredentials(cachePath);
+    }
+
+    if (creds == null) {
+      const keys = get1pAwsKeys(options);
+      //
+      // Early release so we don't block while actually calling AWS API
+      //
+      await release();
+
+      creds = await getNewSessionCredentials(options, keys);
+    }
+  } finally {
+    await release();
+  }
+
+  await writeFile(cachePath, JSON.stringify(creds, null, 2));
+
+  console.log(
+    JSON.stringify(
+      {
+        ...creds,
+        Version: 1,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 index();
