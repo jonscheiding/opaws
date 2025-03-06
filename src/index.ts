@@ -1,3 +1,5 @@
+import { exec } from "child_process";
+import { rmSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -6,9 +8,19 @@ import { Item, item } from "@1password/op-js";
 import { Credentials, STS } from "@aws-sdk/client-sts";
 import { keyBy } from "lodash-es";
 import { lock } from "proper-lockfile";
+import winston from "winston";
 import { z } from "zod";
 
 import { Command } from "@commander-js/extra-typings";
+import notifier from "node-notifier";
+
+type AwsKeys = {
+  accessKeyId: string;
+  secretAccessKey: string;
+} & (
+  | { totp: undefined; mfaSerial: undefined }
+  | { totp: string; mfaSerial: string }
+);
 
 const program = new Command()
   .option("-r, --role-arn <role ARN>", "Specify a role to assume.")
@@ -29,17 +41,22 @@ const program = new Command()
     "Specify the OnePassword item name.",
     "AWS Access Key",
   )
+  .option("--debug", "Open debug log after completion.")
   .option("--no-cache", "Do not use cached credentials if they exist.");
 
-type Options = ReturnType<typeof program.opts>;
+const options = program.parse(process.argv).opts();
 
-type AwsKeys = {
-  accessKeyId: string;
-  secretAccessKey: string;
-} & (
-  | { totp: undefined; mfaSerial: undefined }
-  | { totp: string; mfaSerial: string }
-);
+const logFilename = join(tmpdir(), `opaws-${Date.now()}-${process.pid}.log`);
+
+const logger = winston.createLogger({
+  level: "debug",
+  format: winston.format.simple(),
+  transports: [
+    options.debug
+      ? new winston.transports.Console()
+      : new winston.transports.File({ filename: logFilename }),
+  ],
+});
 
 function sanitizeFilename(filename: string) {
   return filename.replace(/[/\\?%*:|"<>]/g, "-");
@@ -51,7 +68,7 @@ function isFileNotFoundError(e: unknown): e is Error & { code: "ENOENT" } {
   return e.code === "ENOENT";
 }
 
-function getCachePath(options: Options) {
+function getCacheFilename() {
   const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
 
   const cacheKey = [
@@ -88,35 +105,53 @@ async function lockInternal() {
   };
 }
 
-async function getCachedSessionCredentials(cachePath: string) {
-  try {
-    const creds: Credentials = await readFile(cachePath).then((data) =>
-      JSON.parse(data.toString()),
-    );
+async function getCachedSessionCredentials() {
+  const cacheFilename = getCacheFilename();
 
-    if (creds.Expiration != null) {
-      const now = new Date();
-      const expiration = new Date(creds.Expiration);
-      if (expiration >= now) {
-        return undefined;
-      }
-      return creds;
-    }
+  let data: string;
+  try {
+    data = await readFile(cacheFilename).then((buffer) => buffer.toString());
   } catch (e) {
     if (!isFileNotFoundError(e)) {
-      //
-      // @todo: log this error somewhere
-      //
+      throw e;
     }
+    logger.debug(`No cached credentials found.`, cacheFilename);
     return undefined;
+  }
+
+  try {
+    logger.debug(`Found cached credentials`, cacheFilename, data);
+
+    const creds = z
+      .object({
+        AccessKeyId: z.string(),
+        SecretAccessKey: z.string(),
+        SessionToken: z.string(),
+        Expiration: z
+          .string()
+          .datetime()
+          .transform((s) => new Date(s)),
+      })
+      .parse(JSON.parse(data));
+
+    if (creds.Expiration.getTime() < Date.now()) {
+      logger.info(`Cached credentials expired as of ${creds.Expiration}.`);
+      return undefined;
+    }
+
+    return creds;
+  } catch (e) {
+    logger.warn(`Invalid cached credentials.`, e);
   }
 }
 
-function get1pAwsKeys(options: Options): AwsKeys {
+function get1pAwsKeys(): AwsKeys {
   const opResult = item.get(options.opItem, {
     account: options.opAccount,
     vault: options.opVault,
   }) as Item;
+
+  logger.debug(`Found AWS credentials in 1password`, { id: opResult.id });
 
   const fields = keyBy(opResult.fields, "label");
 
@@ -163,7 +198,7 @@ function get1pAwsKeys(options: Options): AwsKeys {
   };
 }
 
-async function getNewSessionCredentials(options: Options, keys: AwsKeys) {
+async function getNewSessionCredentials(keys: AwsKeys) {
   const sts = new STS({
     credentials: {
       accessKeyId: keys.accessKeyId,
@@ -198,34 +233,30 @@ async function getNewSessionCredentials(options: Options, keys: AwsKeys) {
   return creds;
 }
 
-async function index() {
-  const options = program.parse(process.argv).opts();
-
+async function generateCredentials() {
   let creds: Credentials | undefined;
-
-  const cachePath = getCachePath(options);
 
   const release = await lockInternal();
 
   try {
     if (options.cache) {
-      creds = await getCachedSessionCredentials(cachePath);
+      creds = await getCachedSessionCredentials();
     }
 
     if (creds == null) {
-      const keys = get1pAwsKeys(options);
+      const keys = get1pAwsKeys();
       //
       // Early release so we don't block while actually calling AWS API
       //
       await release();
 
-      creds = await getNewSessionCredentials(options, keys);
+      creds = await getNewSessionCredentials(keys);
     }
   } finally {
     await release();
   }
 
-  await writeFile(cachePath, JSON.stringify(creds, null, 2));
+  await writeFile(getCacheFilename(), JSON.stringify(creds, null, 2));
 
   console.log(
     JSON.stringify(
@@ -239,4 +270,28 @@ async function index() {
   );
 }
 
-index();
+try {
+  await generateCredentials();
+  rmSync(logFilename, { force: true });
+} catch (e) {
+  logger.error(e);
+
+  if (!options.debug) {
+    notifier.on("click", () => {
+      exec(`open ${logFilename}`).unref();
+    });
+
+    notifier.on("timeout", () => {
+      rmSync(logFilename, { force: true });
+    });
+
+    notifier.notify({
+      message: "Error generating credentials",
+      title: "OP Credential Process",
+      actions: "View Log",
+      wait: true,
+    });
+  }
+
+  console.error(`Failed to generate credentials.`);
+}
