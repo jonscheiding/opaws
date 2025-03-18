@@ -1,13 +1,13 @@
 import { exec } from "child_process";
-import { rmSync } from "fs";
+import { closeSync, openSync, rmSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import { Item, item } from "@1password/op-js";
 import { Credentials, STS } from "@aws-sdk/client-sts";
+import { lock } from "cross-process-lock";
 import { keyBy } from "lodash-es";
-import { lock } from "proper-lockfile";
 import winston from "winston";
 import { z } from "zod";
 
@@ -85,24 +85,12 @@ function getCacheFilename() {
 async function lockInternal() {
   const lockFileName = join(tmpdir(), "op-credential-process.lock");
 
-  const release = await lock(lockFileName, {
-    retries: {
-      minTimeout: 100,
-      maxTimeout: 500,
-      retries: 60,
-    },
-  });
+  //
+  // ensure lock file exists - cross-process-lock doesn't create it for you
+  //
+  closeSync(openSync(lockFileName, "w"));
 
-  let released = false;
-
-  return async () => {
-    //
-    // allow double-release to simplify calling code
-    //
-    if (released) return;
-    release();
-    released = true;
-  };
+  return await lock(lockFileName);
 }
 
 async function getCachedSessionCredentials() {

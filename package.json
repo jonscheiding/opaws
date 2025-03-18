@@ -18,6 +18,7 @@
     "@1password/op-js": "^0.1.13",
     "@aws-sdk/client-sts": "^3.758.0",
     "commander": "^13.1.0",
+    "cross-process-lock": "^2.1.1",
     "eslint": "^9.13.0",
     "eslint-plugin-import": "^2.31.0",
     "husky": "^9.1.6",
@@ -25,7 +26,6 @@
     "lodash-es": "^4.17.21",
     "node-notifier": "^10.0.1",
     "prettier": "^3.3.3",
-    "proper-lockfile": "^4.1.2",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.11.0",
@@ -39,7 +39,6 @@
     "@types/lodash-es": "^4",
     "@types/node": "^22.7.7",
     "@types/node-notifier": "^8.0.5",
-    "@types/proper-lockfile": "^4",
     "globals": "^15.11.0"
   }
 }
