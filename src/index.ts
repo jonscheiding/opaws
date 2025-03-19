@@ -6,14 +6,13 @@ import { join } from "path";
 
 import op, { Item } from "@1password/op-js";
 import { Credentials, STS } from "@aws-sdk/client-sts";
+import { Command } from "@commander-js/extra-typings";
 import { lock } from "cross-process-lock";
 import { keyBy } from "lodash-es";
+import notifier from "node-notifier";
 import timestring from "timestring";
 import winston from "winston";
 import { z } from "zod";
-
-import { Command } from "@commander-js/extra-typings";
-import notifier from "node-notifier";
 
 type AwsKeys = {
   accessKeyId: string;
