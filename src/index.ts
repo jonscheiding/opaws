@@ -1,10 +1,10 @@
 import { exec } from "child_process";
-import { closeSync, openSync, rmSync } from "fs";
+import { closeSync, openSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { Item, item } from "@1password/op-js";
+import op, { Item } from "@1password/op-js";
 import { Credentials, STS } from "@aws-sdk/client-sts";
 import { lock } from "cross-process-lock";
 import { keyBy } from "lodash-es";
@@ -22,27 +22,67 @@ type AwsKeys = {
   | { totp: string; mfaSerial: string }
 );
 
+const opSchema = z
+  .object({
+    "access key id": z.object({
+      type: z.literal("STRING"),
+      value: z.string(),
+    }),
+    "secret access key": z.object({
+      type: z.union([z.literal("CONCEALED"), z.literal("STRING")]),
+      value: z.string(),
+    }),
+  })
+  .and(
+    z.union([
+      z.object({
+        "mfa serial": z.object({
+          type: z.literal("STRING"),
+          value: z.string(),
+        }),
+        "one-time password": z.object({
+          type: z.literal("OTP"),
+          totp: z.string(),
+        }),
+      }),
+      z.object({
+        "mfa serial": z.undefined(),
+        "one-time password": z.undefined(),
+      }),
+    ]),
+  );
+
 const program = new Command()
   .option("-r, --role-arn <role ARN>", "Specify a role to assume.")
   .option(
     "-s, --role-session-name <role session name>",
     "Specify a session name for the assumed role session.",
   )
-  .option(
-    "-a, --op-account <op account name>",
-    "Specify the OnePassword account name.",
+  .requiredOption(
+    "-i, --op-item <op item>",
+    `Name or ID of the 1Password item containing the AWS access keys.`,
   )
   .option(
     "-v, --op-vault <op vault name>",
-    "Specify the OnePassword vault name.",
+    "Name or ID of the 1Password vault containing the item.",
   )
   .option(
-    "-i, --op-item <op item name>",
-    "Specify the OnePassword item name.",
-    "AWS Access Key",
+    "-a, --op-account <op account name>",
+    "Name or ID of the 1Password account containing the item.",
   )
-  .option("--debug", "Open debug log after completion.")
-  .option("--no-cache", "Do not use cached credentials if they exist.");
+  .option("--debug", "Log debug messages to the console.")
+  .option("--no-cache", "Do not use cached credentials if they exist.")
+  .description(
+    "Generates temporary AWS credentials in the form expected by the aws profile credential_process, " +
+      "using permanent credentials stored in 1Password.\n" +
+      `The 1Password item must have certain fields.
+Required:
+  access key id - Text
+  secret access key - Text or Password
+Optional (must both be present, or neither):
+  mfa serial - Text
+  one-time password - One-Time Password`,
+  );
 
 const options = program.parse(process.argv).opts();
 
@@ -52,9 +92,10 @@ const logger = winston.createLogger({
   level: "debug",
   format: winston.format.simple(),
   transports: [
-    options.debug
-      ? new winston.transports.Console()
-      : new winston.transports.File({ filename: logFilename }),
+    new winston.transports.Console({
+      level: options.debug ? "debug" : "error",
+    }),
+    new winston.transports.File({ filename: logFilename }),
   ],
 });
 
@@ -108,7 +149,7 @@ async function getCachedSessionCredentials() {
   }
 
   try {
-    logger.debug(`Found cached credentials`, cacheFilename, data);
+    logger.debug(`Found cached credentials`, { cacheFilename });
 
     const creds = z
       .object({
@@ -134,56 +175,41 @@ async function getCachedSessionCredentials() {
 }
 
 function get1pAwsKeys(): AwsKeys {
-  const opResult = item.get(options.opItem, {
-    account: options.opAccount,
-    vault: options.opVault,
+  const { opAccount, opVault, opItem } = options;
+
+  logger.debug(`Looking for item in 1password`, {
+    opAccount,
+    opVault,
+    opItem,
+  });
+
+  const item = op.item.get(opItem, {
+    account: opAccount,
+    vault: opVault,
   }) as Item;
 
-  logger.debug(`Found AWS credentials in 1password`, { id: opResult.id });
+  logger.debug(`Found 1password item`, {
+    id: item.id,
+    title: item.title,
+    vault: item.vault,
+  });
 
-  const fields = keyBy(opResult.fields, "label");
+  const fields = opSchema.safeParse(keyBy(item.fields, "label"));
 
-  const baseFields = z
-    .object({
-      "access key id": z.object({
-        type: z.literal("STRING"),
-        value: z.string(),
-      }),
-      "secret access key": z.object({
-        type: z.literal("CONCEALED"),
-        value: z.string(),
-      }),
-    })
-    .parse(fields);
-
-  const totpFields = z
-    .object({
-      "mfa serial": z.object({
-        type: z.literal("STRING"),
-        value: z.string(),
-      }),
-      "one-time password": z.object({
-        type: z.literal("OTP"),
-        totp: z.string(),
-      }),
-    })
-    .safeParse(fields);
-
-  if (totpFields.success) {
-    return {
-      accessKeyId: baseFields["access key id"].value,
-      secretAccessKey: baseFields["secret access key"].value,
-      mfaSerial: totpFields.data["mfa serial"].value,
-      totp: totpFields.data["one-time password"].totp,
-    };
+  if (!fields.success) {
+    logger.warn(fields.error);
+    logger.error(program.helpInformation());
+    throw new Error(
+      `1Password item ${item.id} is missing some fields, or they are the wrong type`,
+    );
   }
 
   return {
-    accessKeyId: baseFields["access key id"].value,
-    secretAccessKey: baseFields["secret access key"].value,
-    mfaSerial: undefined,
-    totp: undefined,
-  };
+    accessKeyId: fields.data["access key id"].value,
+    secretAccessKey: fields.data["secret access key"].value,
+    mfaSerial: fields.data["mfa serial"]?.value,
+    totp: fields.data["one-time password"]?.totp,
+  } as AwsKeys;
 }
 
 async function getNewSessionCredentials(keys: AwsKeys) {
@@ -260,17 +286,12 @@ async function generateCredentials() {
 
 try {
   await generateCredentials();
-  rmSync(logFilename, { force: true });
 } catch (e) {
   logger.error(e);
 
-  if (!options.debug) {
+  if (!process.stdout.isTTY) {
     notifier.on("click", () => {
       exec(`open ${logFilename}`).unref();
-    });
-
-    notifier.on("timeout", () => {
-      rmSync(logFilename, { force: true });
     });
 
     notifier.notify({
@@ -282,4 +303,5 @@ try {
   }
 
   console.error(`Failed to generate credentials.`);
+  console.error(`Debug log saved to ${logFilename}.`);
 }
