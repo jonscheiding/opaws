@@ -8,6 +8,7 @@ import op, { Item } from "@1password/op-js";
 import { Credentials, STS } from "@aws-sdk/client-sts";
 import { lock } from "cross-process-lock";
 import { keyBy } from "lodash-es";
+import timestring from "timestring";
 import winston from "winston";
 import { z } from "zod";
 
@@ -69,6 +70,11 @@ const program = new Command()
   .option(
     "-a, --op-account <op account name>",
     "Name or ID of the 1Password account containing the item.",
+  )
+  .option(
+    "-d, --duration <duration>",
+    "Duration of the session. Expressed as a time string, see https://www.npmjs.com/package/timestring.",
+    (value) => timestring(value),
   )
   .option("--debug", "Log debug messages to the console.")
   .option("--no-cache", "Do not use cached credentials if they exist.")
@@ -226,6 +232,7 @@ async function getNewSessionCredentials(keys: AwsKeys) {
     const response = await sts.getSessionToken({
       SerialNumber: keys.mfaSerial,
       TokenCode: keys.totp,
+      DurationSeconds: options.duration,
     });
 
     creds = response.Credentials;
@@ -235,6 +242,7 @@ async function getNewSessionCredentials(keys: AwsKeys) {
       TokenCode: keys.totp,
       RoleArn: options.roleArn,
       RoleSessionName: options.roleSessionName,
+      DurationSeconds: options.duration,
     });
 
     creds = response.Credentials;
