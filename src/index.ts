@@ -118,6 +118,7 @@ function getCacheFilename() {
   const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
 
   const cacheKey = [
+    "opaws",
     opAccount ?? "default",
     opVault ?? "default",
     opItem,
@@ -128,7 +129,7 @@ function getCacheFilename() {
   return join(tmpdir(), sanitizeFilename(`${cacheKey}.json`));
 }
 
-async function lockInternal() {
+function lockInternal() {
   const lockFileName = join(tmpdir(), "op-credential-process.lock");
 
   //
@@ -136,7 +137,7 @@ async function lockInternal() {
   //
   closeSync(openSync(lockFileName, "w"));
 
-  return await lock(lockFileName);
+  return lock(lockFileName);
 }
 
 async function getCachedSessionCredentials() {
@@ -257,8 +258,7 @@ async function getNewSessionCredentials(keys: AwsKeys) {
 async function generateCredentials() {
   let creds: Credentials | undefined;
 
-  const release = await lockInternal();
-
+  const unlock = await lockInternal();
   try {
     if (options.cache) {
       creds = await getCachedSessionCredentials();
@@ -266,18 +266,13 @@ async function generateCredentials() {
 
     if (creds == null) {
       const keys = get1pAwsKeys();
-      //
-      // Early release so we don't block while actually calling AWS API
-      //
-      await release();
-
       creds = await getNewSessionCredentials(keys);
     }
-  } finally {
-    await release();
-  }
 
-  await writeFile(getCacheFilename(), JSON.stringify(creds, null, 2));
+    await writeFile(getCacheFilename(), JSON.stringify(creds, null, 2));
+  } finally {
+    unlock();
+  }
 
   console.log(
     JSON.stringify(
