@@ -1,10 +1,14 @@
 {
   "name": "op-credential-process",
+  "version": "1.0",
   "packageManager": "npm@10.8.2+sha512.c7f0088c520a46596b85c6f8f1da943400199748a0f7ea8cb8df75469668dc26f6fb3ba26df87e2884a5ebe91557292d0f3db7d0929cdb4f14910c3032ac81fb",
   "type": "module",
   "author": {
     "name": "Jon Scheiding",
     "url": "https://github.com/jonscheiding"
+  },
+  "bin": {
+    "opaws": "./cli"
   },
   "scripts": {
     "build": "tsc",
@@ -17,6 +21,7 @@
   "dependencies": {
     "@1password/op-js": "^0.1.13",
     "@aws-sdk/client-sts": "^3.758.0",
+    "@commander-js/extra-typings": "^13.1.0",
     "commander": "^13.1.0",
     "cross-process-lock": "^2.1.1",
     "eslint": "^9.13.0",
@@ -34,7 +39,6 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@commander-js/extra-typings": "^13.1.0",
     "@eslint/js": "^9.13.0",
     "@types/ini": "^4.1.1",
     "@types/lodash-es": "^4",

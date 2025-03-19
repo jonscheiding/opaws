@@ -7,14 +7,14 @@
     "forceConsistentCasingInFileNames": true,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "noEmit": true,
     "target": "ES2023",
     "isolatedModules": true,
+    "outDir": "./dist",
     "noFallthroughCasesInSwitch": true,
     "noImplicitAny": true,
     "skipLibCheck": true,
     "sourceMap": true,
     "strict": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src"]
 }
