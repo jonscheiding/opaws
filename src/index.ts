@@ -364,21 +364,28 @@ async function generateCredentials() {
 try {
   await generateCredentials();
 } catch (e) {
+  console.error(`Failed to generate credentials.`);
+  console.error(`Debug log saved to ${logFilename}.`);
+
   logger.error(e);
 
   if (!process.stdout.isTTY) {
     notifier.on("click", () => {
       exec(`open ${logFilename}`).unref();
+      process.exit(1);
     });
 
+    notifier.on("timeout", () => process.exit(1));
+
     notifier.notify({
-      message: "Error generating credentials",
+      message:
+        (e instanceof Error ? e.message : undefined) ??
+        "Error generating credentials",
       title: "OPAWS",
       actions: "View Log",
       wait: true,
     });
+  } else {
+    process.exit(1);
   }
-
-  console.error(`Failed to generate credentials.`);
-  console.error(`Debug log saved to ${logFilename}.`);
 }
