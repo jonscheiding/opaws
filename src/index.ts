@@ -1,13 +1,14 @@
 import { exec } from "child_process";
 import { closeSync, openSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
+import assert from "node:assert";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import op, { Item } from "@1password/op-js";
-import { Credentials, STS } from "@aws-sdk/client-sts";
+import { Credentials, STS, STSServiceException } from "@aws-sdk/client-sts";
 import { Command } from "@commander-js/extra-typings";
-import { lock } from "cross-process-lock";
+import { LockCallback, withLock } from "cross-process-lock";
 import { keyBy } from "lodash-es";
 import notifier from "node-notifier";
 import timestring from "timestring";
@@ -114,6 +115,28 @@ function isFileNotFoundError(e: unknown): e is Error & { code: "ENOENT" } {
   return e.code === "ENOENT";
 }
 
+function isInvalidMfaError(e: unknown): e is STSServiceException & {
+  Code: "AccessDenied";
+  message: "MultiFactorAuthentication failed with invalid MFA one time pass code. ";
+} {
+  if (!(e instanceof STSServiceException)) return false;
+  if (!("Code" in e)) return false;
+  if (!("message" in e)) return false;
+  return (
+    e.Code === "AccessDenied" &&
+    e.message ===
+      "MultiFactorAuthentication failed with invalid MFA one time pass code. "
+  );
+}
+
+function getTotpSecondsRemaining() {
+  //
+  // TOTPs cycle every 30 seconds starting at the unix epoch
+  //
+  const secondsSinceEpoch = Math.floor(Date.now() / 1000);
+  return 30 - (secondsSinceEpoch % 30);
+}
+
 function getCacheFilename() {
   const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
 
@@ -129,7 +152,7 @@ function getCacheFilename() {
   return join(tmpdir(), sanitizeFilename(`${cacheKey}.json`));
 }
 
-function lockInternal() {
+function withLockInternal<T>(callback: LockCallback<T>) {
   const lockFileName = join(tmpdir(), "op-credential-process.lock");
 
   //
@@ -137,7 +160,7 @@ function lockInternal() {
   //
   closeSync(openSync(lockFileName, "w"));
 
-  return lock(lockFileName);
+  return withLock(lockFileName, callback);
 }
 
 async function getCachedSessionCredentials() {
@@ -256,23 +279,41 @@ async function getNewSessionCredentials(keys: AwsKeys) {
 }
 
 async function generateCredentials() {
-  let creds: Credentials | undefined;
+  const creds = await withLockInternal(async () => {
+    let maybeCreds: Credentials | undefined;
 
-  const unlock = await lockInternal();
-  try {
-    if (options.cache) {
-      creds = await getCachedSessionCredentials();
-    }
+    for (let i = 0; i < 2 && maybeCreds == null; i++) {
+      if (options.cache) {
+        maybeCreds = await getCachedSessionCredentials();
+        if (maybeCreds != null) return maybeCreds;
+      }
 
-    if (creds == null) {
       const keys = get1pAwsKeys();
-      creds = await getNewSessionCredentials(keys);
+      try {
+        maybeCreds = await getNewSessionCredentials(keys);
+      } catch (e) {
+        if (!isInvalidMfaError(e) || i > 0) {
+          throw e;
+        }
+
+        //
+        // If the credential process was called multiple times quickly, it might have tried to re-use
+        // the same one-time code. Wait for it to cycle then try again.
+        //
+        const pauseSeconds = getTotpSecondsRemaining() + 3;
+        logger.warn(
+          `Invalid MFA code on first attempt. Pausing for ${pauseSeconds} seconds to try again in case of reuse.`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, pauseSeconds * 1000),
+        );
+      }
     }
 
-    await writeFile(getCacheFilename(), JSON.stringify(creds, null, 2));
-  } finally {
-    unlock();
-  }
+    assert.ok(maybeCreds != null);
+    await writeFile(getCacheFilename(), JSON.stringify(maybeCreds, null, 2));
+    return maybeCreds;
+  });
 
   console.log(
     JSON.stringify(
