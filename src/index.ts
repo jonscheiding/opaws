@@ -8,7 +8,7 @@ import { join } from "path";
 import op, { Item } from "@1password/op-js";
 import { Credentials, STS, STSServiceException } from "@aws-sdk/client-sts";
 import { Command } from "@commander-js/extra-typings";
-import { LockCallback, withLock } from "cross-process-lock";
+import { lock, LockCallback } from "cross-process-lock";
 import { keyBy } from "lodash-es";
 import notifier from "node-notifier";
 import timestring from "timestring";
@@ -151,7 +151,7 @@ function getCacheFilename() {
   const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
 
   const cacheKey = [
-    "opaws",
+    "opaws-cache",
     opAccount ?? "default",
     opVault ?? "default",
     opItem,
@@ -162,15 +162,20 @@ function getCacheFilename() {
   return join(tmpdir(), sanitizeFilename(`${cacheKey}.json`));
 }
 
-function withLockInternal<T>(callback: LockCallback<T>) {
-  const lockFileName = join(tmpdir(), "op-credential-process.lock");
+async function withLockInternal<T>(callback: LockCallback<T>) {
+  const lockFileName = join(tmpdir(), "opaws.lock");
 
   //
   // ensure lock file exists - cross-process-lock doesn't create it for you
   //
   closeSync(openSync(lockFileName, "w"));
 
-  return withLock(lockFileName, callback);
+  const release = await lock(lockFileName);
+  try {
+    return await callback();
+  } finally {
+    release();
+  }
 }
 
 async function getCachedSessionCredentials() {
