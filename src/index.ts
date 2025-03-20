@@ -170,7 +170,20 @@ async function withLockInternal<T>(callback: LockCallback<T>) {
   //
   closeSync(openSync(lockFileName, "w"));
 
-  const release = await lock(lockFileName);
+  //
+  // cross-process-lock seems to have a race condition where two processes can get the lock
+  // if they ask at exactly the same instant
+  // we can't "fix" this but we can introduce some jitter to make it less likely for applications
+  // that are authenticating a bunch of profiles at the same time
+  //
+  const jitter = Math.random() * 500;
+  logger.debug(`Jittering for ${jitter}ms`);
+  await new Promise((resolve) => setTimeout(resolve, jitter));
+
+  const release = await lock(lockFileName, {
+    lockTimeout: 30000,
+  });
+
   try {
     return await callback();
   } finally {
