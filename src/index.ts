@@ -12,6 +12,7 @@ import { LockCallback, withLock } from "cross-process-lock";
 import { keyBy } from "lodash-es";
 import notifier from "node-notifier";
 import timestring from "timestring";
+import { MESSAGE } from "triple-beam";
 import winston from "winston";
 import { z } from "zod";
 
@@ -92,11 +93,20 @@ Optional (must both be present, or neither):
 
 const options = program.parse(process.argv).opts();
 
-const logFilename = join(tmpdir(), `opaws-${Date.now()}-${process.pid}.log`);
+const logFilename = join(
+  tmpdir(),
+  `opaws-log-${Date.now()}-${process.pid}.log`,
+);
 
 const logger = winston.createLogger({
   level: "debug",
-  format: winston.format.simple(),
+  format: winston.format.combine(winston.format.simple(), {
+    transform: (info) => {
+      info[MESSAGE] =
+        `${new Date().toISOString()} ${process.pid} ${info[MESSAGE]}`;
+      return info;
+    },
+  }),
   transports: [
     new winston.transports.Console({
       level: options.debug ? "debug" : "error",
@@ -279,13 +289,19 @@ async function getNewSessionCredentials(keys: AwsKeys) {
 }
 
 async function generateCredentials() {
+  logger.info(`Generating credentials`, options);
+
   const creds = await withLockInternal(async () => {
+    logger.debug(`Lock acquired`);
+
     let maybeCreds: Credentials | undefined;
 
     for (let i = 0; i < 2 && maybeCreds == null; i++) {
       if (options.cache) {
         maybeCreds = await getCachedSessionCredentials();
         if (maybeCreds != null) return maybeCreds;
+      } else {
+        logger.debug("Skipping cache");
       }
 
       const keys = get1pAwsKeys();
