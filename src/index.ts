@@ -373,7 +373,7 @@ try {
 
     notifier.notify({
       message: "Error generating credentials",
-      title: "OP Credential Process",
+      title: "OPAWS",
       actions: "View Log",
       wait: true,
     });
