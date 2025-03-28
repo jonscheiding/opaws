@@ -292,7 +292,8 @@ async function getNewSessionCredentials(keys: AwsKeys) {
       SerialNumber: keys.mfaSerial,
       TokenCode: keys.totp,
       RoleArn: options.roleArn,
-      RoleSessionName: options.roleSessionName,
+      RoleSessionName:
+        options.roleSessionName ?? `temporary-session-${Date.now().toString()}`,
       DurationSeconds: options.duration,
     });
 
