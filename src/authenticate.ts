@@ -12,9 +12,11 @@ import { lock, LockCallback } from "cross-process-lock";
 import { keyBy } from "lodash-es";
 import notifier from "node-notifier";
 import timestring from "timestring";
-import { MESSAGE } from "triple-beam";
-import winston from "winston";
 import { z } from "zod";
+
+import { configureDebug, LOG_FILENAME, logger } from "./logger.js";
+
+export const LOCK_FILE_NAME = join(tmpdir(), "opaws.lock");
 
 type AwsKeys = {
   accessKeyId: string;
@@ -54,7 +56,7 @@ const opSchema = z
     ]),
   );
 
-const program = new Command()
+export const command = new Command("authenticate")
   .option("-r, --role-arn <role ARN>", "Specify a role to assume.")
   .option(
     "-s, --role-session-name <role session name>",
@@ -89,31 +91,10 @@ Required:
 Optional (must both be present, or neither):
   mfa serial - Text
   one-time password - One-Time Password`,
-  );
+  )
+  .action(authenticate);
 
-const options = program.parse(process.argv).opts();
-
-const logFilename = join(
-  tmpdir(),
-  `opaws-log-${Date.now()}-${process.pid}.log`,
-);
-
-const logger = winston.createLogger({
-  level: "debug",
-  format: winston.format.combine(winston.format.simple(), {
-    transform: (info) => {
-      info[MESSAGE] =
-        `${new Date().toISOString()} ${process.pid} ${info[MESSAGE]}`;
-      return info;
-    },
-  }),
-  transports: [
-    new winston.transports.Console({
-      level: options.debug ? "debug" : "error",
-    }),
-    new winston.transports.File({ filename: logFilename }),
-  ],
-});
+type AuthenticateOptions = ReturnType<typeof command.opts>;
 
 function sanitizeFilename(filename: string) {
   return filename.replace(/[/\\?%*:|"<>]/g, "-");
@@ -147,7 +128,7 @@ function getTotpSecondsRemaining() {
   return 30 - (secondsSinceEpoch % 30);
 }
 
-function getCacheFilename() {
+function getCacheFilename(options: AuthenticateOptions) {
   const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
 
   const cacheKey = [
@@ -163,12 +144,10 @@ function getCacheFilename() {
 }
 
 async function withLockInternal<T>(callback: LockCallback<T>) {
-  const lockFileName = join(tmpdir(), "opaws.lock");
-
   //
   // ensure lock file exists - cross-process-lock doesn't create it for you
   //
-  closeSync(openSync(lockFileName, "w"));
+  closeSync(openSync(LOCK_FILE_NAME, "w"));
 
   //
   // cross-process-lock seems to have a race condition where two processes can get the lock
@@ -180,7 +159,7 @@ async function withLockInternal<T>(callback: LockCallback<T>) {
   logger.debug(`Jittering for ${jitter}ms`);
   await new Promise((resolve) => setTimeout(resolve, jitter));
 
-  const release = await lock(lockFileName, {
+  const release = await lock(LOCK_FILE_NAME, {
     lockTimeout: 30000,
   });
 
@@ -191,8 +170,8 @@ async function withLockInternal<T>(callback: LockCallback<T>) {
   }
 }
 
-async function getCachedSessionCredentials() {
-  const cacheFilename = getCacheFilename();
+async function getCachedSessionCredentials(options: AuthenticateOptions) {
+  const cacheFilename = getCacheFilename(options);
 
   let data: string;
   try {
@@ -231,7 +210,7 @@ async function getCachedSessionCredentials() {
   }
 }
 
-function get1pAwsKeys(): AwsKeys {
+function get1pAwsKeys(options: AuthenticateOptions): AwsKeys {
   const { opAccount, opVault, opItem } = options;
 
   logger.debug(`Looking for item in 1password`, {
@@ -255,7 +234,7 @@ function get1pAwsKeys(): AwsKeys {
 
   if (!fields.success) {
     logger.warn(fields.error);
-    logger.error(program.helpInformation());
+    logger.error(command.helpInformation());
     throw new Error(
       `1Password item ${item.id} is missing some fields, or they are the wrong type`,
     );
@@ -269,7 +248,10 @@ function get1pAwsKeys(): AwsKeys {
   } as AwsKeys;
 }
 
-async function getNewSessionCredentials(keys: AwsKeys) {
+async function getNewSessionCredentials(
+  options: AuthenticateOptions,
+  keys: AwsKeys,
+) {
   const sts = new STS({
     credentials: {
       accessKeyId: keys.accessKeyId,
@@ -307,7 +289,7 @@ async function getNewSessionCredentials(keys: AwsKeys) {
   return creds;
 }
 
-async function generateCredentials() {
+async function generateCredentials(options: AuthenticateOptions) {
   logger.info(`Generating credentials`, options);
 
   const creds = await withLockInternal(async () => {
@@ -317,15 +299,15 @@ async function generateCredentials() {
 
     for (let i = 0; i < 2 && maybeCreds == null; i++) {
       if (options.cache) {
-        maybeCreds = await getCachedSessionCredentials();
+        maybeCreds = await getCachedSessionCredentials(options);
         if (maybeCreds != null) return maybeCreds;
       } else {
         logger.debug("Skipping cache");
       }
 
-      const keys = get1pAwsKeys();
+      const keys = get1pAwsKeys(options);
       try {
-        maybeCreds = await getNewSessionCredentials(keys);
+        maybeCreds = await getNewSessionCredentials(options, keys);
       } catch (e) {
         if (!isInvalidMfaError(e) || i > 0) {
           throw e;
@@ -346,7 +328,10 @@ async function generateCredentials() {
     }
 
     assert.ok(maybeCreds != null);
-    await writeFile(getCacheFilename(), JSON.stringify(maybeCreds, null, 2));
+    await writeFile(
+      getCacheFilename(options),
+      JSON.stringify(maybeCreds, null, 2),
+    );
     return maybeCreds;
   });
 
@@ -362,31 +347,37 @@ async function generateCredentials() {
   );
 }
 
-try {
-  await generateCredentials();
-} catch (e) {
-  console.error(`Failed to generate credentials.`);
-  console.error(`Debug log saved to ${logFilename}.`);
+async function authenticate(options: AuthenticateOptions) {
+  if (options.debug) {
+    configureDebug();
+  }
 
-  logger.error(e);
+  try {
+    await generateCredentials(options);
+  } catch (e) {
+    console.error(`Failed to generate credentials.`);
+    console.error(`Debug log saved to ${LOG_FILENAME}.`);
 
-  if (!process.stdout.isTTY) {
-    notifier.on("click", () => {
-      exec(`open ${logFilename}`).unref();
+    logger.error(e);
+
+    if (!process.stdout.isTTY) {
+      notifier.on("click", () => {
+        exec(`open ${LOG_FILENAME}`).unref();
+        process.exit(1);
+      });
+
+      notifier.on("timeout", () => process.exit(1));
+
+      notifier.notify({
+        message:
+          (e instanceof Error ? e.message : undefined) ??
+          "Error generating credentials",
+        title: "OPAWS",
+        actions: "View Log",
+        wait: true,
+      });
+    } else {
       process.exit(1);
-    });
-
-    notifier.on("timeout", () => process.exit(1));
-
-    notifier.notify({
-      message:
-        (e instanceof Error ? e.message : undefined) ??
-        "Error generating credentials",
-      title: "OPAWS",
-      actions: "View Log",
-      wait: true,
-    });
-  } else {
-    process.exit(1);
+    }
   }
 }

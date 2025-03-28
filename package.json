@@ -12,8 +12,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "tsx src/index.ts",
-    "start:debug": "tsx --inspect src/index.ts",
+    "start": "tsx src/cli.ts",
+    "start:debug": "tsx --inspect src/cli.ts",
     "lint": "prettier -c src && eslint src",
     "postinstall": "husky"
   },
