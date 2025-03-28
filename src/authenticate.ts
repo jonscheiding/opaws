@@ -14,9 +14,12 @@ import notifier from "node-notifier";
 import timestring from "timestring";
 import { z } from "zod";
 
-import { configureDebug, LOG_FILENAME, logger } from "./logger.js";
-
-export const LOCK_FILE_NAME = join(tmpdir(), "opaws.lock");
+import { configureDebugLogging, LOG_FILENAME, logger } from "./logger.js";
+import {
+  isFileNotFoundError,
+  LOCK_FILE_NAME,
+  sanitizeFilename,
+} from "./util.js";
 
 type AwsKeys = {
   accessKeyId: string;
@@ -95,16 +98,6 @@ Optional (must both be present, or neither):
   .action(authenticate);
 
 type AuthenticateOptions = ReturnType<typeof command.opts>;
-
-function sanitizeFilename(filename: string) {
-  return filename.replace(/[/\\?%*:|"<>]/g, "-");
-}
-
-function isFileNotFoundError(e: unknown): e is Error & { code: "ENOENT" } {
-  if (!(e instanceof Error)) return false;
-  if (!("code" in e)) return false;
-  return e.code === "ENOENT";
-}
 
 function isInvalidMfaError(e: unknown): e is STSServiceException & {
   Code: "AccessDenied";
@@ -349,7 +342,7 @@ async function generateCredentials(options: AuthenticateOptions) {
 
 async function authenticate(options: AuthenticateOptions) {
   if (options.debug) {
-    configureDebug();
+    configureDebugLogging();
   }
 
   try {

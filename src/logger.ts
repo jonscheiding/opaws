@@ -28,6 +28,6 @@ export const logger = winston.createLogger({
   ],
 });
 
-export function configureDebug() {
+export function configureDebugLogging() {
   consoleTransport.level = "debug";
 }
