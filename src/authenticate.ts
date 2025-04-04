@@ -84,17 +84,7 @@ export const command = new Command("authenticate")
   )
   .option("--debug", "Log debug messages to the console.")
   .option("--no-cache", "Do not use cached credentials if they exist.")
-  .description(
-    "Generates temporary AWS credentials in the form expected by the aws profile credential_process, " +
-      "using permanent credentials stored in 1Password.\n" +
-      `The 1Password item must have certain fields.
-Required:
-  access key id - Text
-  secret access key - Text or Password
-Optional (must both be present, or neither):
-  mfa serial - Text
-  one-time password - One-Time Password`,
-  )
+  .description("Generates credentials as an AWS CLI credential_process.")
   .action(authenticate);
 
 type AuthenticateOptions = ReturnType<typeof command.opts>;
