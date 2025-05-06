@@ -13,7 +13,7 @@ This is a utility that allows storing AWS credentials in 1Password, and easily u
 
 The tool itself requires no configuration. A few things to set up for it to work:
 
-# 1Password CLI configuration
+### 1Password CLI configuration
 
 OPAWS requires the 1Password CLI. If you have not set this up, see [the documentation](https://developer.1password.com/docs/cli/get-started/).
 
@@ -37,6 +37,16 @@ In your `.aws/config` file, set up your profiles like so:
 region=us-east-1
 credential_process=opaws --op-item "My Item Name"
 ```
+
+### Notifications
+
+When used outside a TTY, `opaws` will send notifications to your Notification Center. To ensure this works and appropriate permissions are granted, run:
+
+```
+$ opaws util notify
+```
+
+# Usage
 
 There are several arguments you can pass to `opaws` to customize its behavior:
 
