@@ -1,6 +1,6 @@
 import { exec } from "child_process";
 import { closeSync, openSync } from "fs";
-import { readFile, writeFile } from "fs/promises";
+import { readFile, rename, writeFile } from "fs/promises";
 import assert from "node:assert";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -15,11 +15,7 @@ import timestring from "timestring";
 import { z } from "zod";
 
 import { configureDebugLogging, LOG_FILENAME, logger } from "./logger.js";
-import {
-  isFileNotFoundError,
-  LOCK_FILE_NAME,
-  sanitizeFilename,
-} from "./util.js";
+import { isFileNotFoundError, sanitizeFilename } from "./util.js";
 
 type AwsKeys = {
   accessKeyId: string;
@@ -28,6 +24,12 @@ type AwsKeys = {
   | { totp: undefined; mfaSerial: undefined }
   | { totp: string; mfaSerial: string }
 );
+
+type BaseCreds = {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+};
 
 const opSchema = z
   .object({
@@ -58,6 +60,18 @@ const opSchema = z
       }),
     ]),
   );
+
+const cachedCredentialsSchema = z.object({
+  AccessKeyId: z.string(),
+  SecretAccessKey: z.string(),
+  SessionToken: z.string(),
+  Expiration: z
+    .string()
+    .datetime()
+    .transform((s) => new Date(s)),
+});
+
+type CachedCredentials = z.infer<typeof cachedCredentialsSchema>;
 
 export const command = new Command("authenticate")
   .option("-r, --role-arn <role ARN>", "Specify a role to assume.")
@@ -111,86 +125,98 @@ function getTotpSecondsRemaining() {
   return 30 - (secondsSinceEpoch % 30);
 }
 
-function getCacheFilename(options: AuthenticateOptions) {
-  const { opAccount, opVault, opItem, roleArn, roleSessionName } = options;
-
-  const cacheKey = [
-    "opaws-cache",
-    opAccount ?? "default",
-    opVault ?? "default",
-    opItem,
-    roleArn ?? "default",
-    roleSessionName ?? "default",
-  ].join("-");
-
-  return join(tmpdir(), sanitizeFilename(`${cacheKey}.json`));
+function tmpFile(prefix: string, parts: (string | undefined)[], ext: string) {
+  const key = [prefix, ...parts.map((p) => p ?? "default")].join("-");
+  return join(tmpdir(), sanitizeFilename(`${key}.${ext}`));
 }
 
-async function withLockInternal<T>(callback: LockCallback<T>) {
+function getSessionCacheFilename(options: AuthenticateOptions) {
+  return tmpFile(
+    "opaws-cache-session",
+    [options.opAccount, options.opVault, options.opItem],
+    "json",
+  );
+}
+
+function getRoleCacheFilename(options: AuthenticateOptions) {
+  assert.ok(options.roleArn);
+  return tmpFile(
+    "opaws-cache-role",
+    [
+      options.opAccount,
+      options.opVault,
+      options.opItem,
+      options.roleArn,
+      options.roleSessionName,
+    ],
+    "json",
+  );
+}
+
+function getSessionLockFilename(options: AuthenticateOptions) {
+  return tmpFile(
+    "opaws-lock-session",
+    [options.opAccount, options.opVault, options.opItem],
+    "lock",
+  );
+}
+
+async function withLock<T>(lockFile: string, callback: LockCallback<T>) {
   //
   // ensure lock file exists - cross-process-lock doesn't create it for you
+  // open with "a" rather than "w" to avoid truncating a file that may currently
+  // be involved in another process's lock state
   //
-  closeSync(openSync(LOCK_FILE_NAME, "w"));
+  closeSync(openSync(lockFile, "a"));
 
-  //
-  // cross-process-lock seems to have a race condition where two processes can get the lock
-  // if they ask at exactly the same instant
-  // we can't "fix" this but we can introduce some jitter to make it less likely for applications
-  // that are authenticating a bunch of profiles at the same time
-  //
-  const jitter = Math.random() * 500;
-  logger.debug(`Jittering for ${jitter}ms`);
-  await new Promise((resolve) => setTimeout(resolve, jitter));
-
-  const release = await lock(LOCK_FILE_NAME, {
-    lockTimeout: 30000,
-  });
+  logger.debug(`Acquiring lock`, { lockFile });
+  const release = await lock(lockFile, { lockTimeout: 60000 });
+  logger.debug(`Lock acquired`, { lockFile });
 
   try {
     return await callback();
   } finally {
     release();
+    logger.debug(`Lock released`, { lockFile });
   }
 }
 
-async function getCachedSessionCredentials(options: AuthenticateOptions) {
-  const cacheFilename = getCacheFilename(options);
-
+async function readCachedCredentials(
+  filename: string,
+): Promise<CachedCredentials | undefined> {
   let data: string;
   try {
-    data = await readFile(cacheFilename).then((buffer) => buffer.toString());
+    data = (await readFile(filename)).toString();
   } catch (e) {
-    if (!isFileNotFoundError(e)) {
-      throw e;
-    }
-    logger.debug(`No cached credentials found.`, cacheFilename);
+    if (!isFileNotFoundError(e)) throw e;
+    logger.debug(`No cached credentials found.`, { filename });
     return undefined;
   }
 
   try {
-    logger.debug(`Found cached credentials`, { cacheFilename });
-
-    const creds = z
-      .object({
-        AccessKeyId: z.string(),
-        SecretAccessKey: z.string(),
-        SessionToken: z.string(),
-        Expiration: z
-          .string()
-          .datetime()
-          .transform((s) => new Date(s)),
-      })
-      .parse(JSON.parse(data));
-
+    const creds = cachedCredentialsSchema.parse(JSON.parse(data));
     if (creds.Expiration.getTime() < Date.now()) {
-      logger.info(`Cached credentials expired as of ${creds.Expiration}.`);
+      logger.info(`Cached credentials expired as of ${creds.Expiration}.`, {
+        filename,
+      });
       return undefined;
     }
-
+    logger.debug(`Found cached credentials`, { filename });
     return creds;
   } catch (e) {
     logger.warn(`Invalid cached credentials.`, e);
+    return undefined;
   }
+}
+
+async function writeCachedCredentials(filename: string, creds: Credentials) {
+  //
+  // Write to a temp file then rename, so a concurrent reader never sees
+  // a half-written JSON document.
+  //
+  const tmp = `${filename}.tmp.${process.pid}`;
+  await writeFile(tmp, JSON.stringify(creds, null, 2));
+  await rename(tmp, filename);
 }
 
 function get1pAwsKeys(options: AuthenticateOptions): AwsKeys {
@@ -231,10 +257,10 @@ function get1pAwsKeys(options: AuthenticateOptions): AwsKeys {
   } as AwsKeys;
 }
 
-async function getNewSessionCredentials(
-  options: AuthenticateOptions,
+async function fetchSessionToken(
   keys: AwsKeys,
-) {
+  durationSeconds: number | undefined,
+): Promise<Credentials> {
   const sts = new STS({
     credentials: {
       accessKeyId: keys.accessKeyId,
@@ -242,64 +268,81 @@ async function getNewSessionCredentials(
     },
   });
 
-  let creds: Credentials | undefined;
+  const response = await sts.getSessionToken({
+    SerialNumber: keys.mfaSerial,
+    TokenCode: keys.totp,
+    DurationSeconds: durationSeconds,
+  });
 
-  if (options.roleArn == null) {
-    const response = await sts.getSessionToken({
-      SerialNumber: keys.mfaSerial,
-      TokenCode: keys.totp,
-      DurationSeconds: options.duration,
-    });
-
-    creds = response.Credentials;
-  } else {
-    const response = await sts.assumeRole({
-      SerialNumber: keys.mfaSerial,
-      TokenCode: keys.totp,
-      RoleArn: options.roleArn,
-      RoleSessionName:
-        options.roleSessionName ?? `temporary-session-${Date.now().toString()}`,
-      DurationSeconds: options.duration,
-    });
-
-    creds = response.Credentials;
+  if (response.Credentials == null) {
+    throw new Error("STS GetSessionToken returned no credentials.");
   }
-
-  if (creds == null) {
-    throw new Error(`Failed to generate AWS session credentials.`);
-  }
-
-  return creds;
+  return response.Credentials;
 }
 
-async function generateCredentials(options: AuthenticateOptions) {
-  logger.info(`Generating credentials`, options);
+async function fetchAssumedRole(
+  baseCreds: BaseCreds,
+  options: AuthenticateOptions,
+): Promise<Credentials> {
+  assert.ok(options.roleArn);
 
-  const creds = await withLockInternal(async () => {
-    logger.debug(`Lock acquired`);
+  const sts = new STS({ credentials: baseCreds });
 
-    let maybeCreds: Credentials | undefined;
+  const response = await sts.assumeRole({
+    RoleArn: options.roleArn,
+    RoleSessionName:
+      options.roleSessionName ?? `temporary-session-${Date.now().toString()}`,
+    DurationSeconds: options.duration
+      ? Math.min(options.duration, 60 * 60 * 1000)
+      : undefined,
+  });
 
-    for (let i = 0; i < 2 && maybeCreds == null; i++) {
-      if (options.cache) {
-        maybeCreds = await getCachedSessionCredentials(options);
-        if (maybeCreds != null) return maybeCreds;
-      } else {
-        logger.debug("Skipping cache");
-      }
+  if (response.Credentials == null) {
+    throw new Error("STS AssumeRole returned no credentials.");
+  }
+  return response.Credentials;
+}
 
-      const keys = get1pAwsKeys(options);
+async function getOrFetchSessionCredentials(
+  options: AuthenticateOptions,
+): Promise<CachedCredentials | Credentials> {
+  const cacheFile = getSessionCacheFilename(options);
+
+  if (options.cache) {
+    const cached = await readCachedCredentials(cacheFile);
+    if (cached) return cached;
+  } else {
+    logger.debug("Skipping session cache");
+  }
+
+  return withLock(getSessionLockFilename(options), async () => {
+    //
+    // Re-check after acquiring the lock: a concurrent process may have
+    // populated the cache while we were waiting.
+    //
+    if (options.cache) {
+      const cached = await readCachedCredentials(cacheFile);
+      if (cached) return cached;
+    }
+
+    //
+    // When chained into AssumeRole, the role session is hard-capped at 1 hour
+    // regardless of how long the underlying session-creds live. So we only
+    // honour --duration here in the standalone case; otherwise let the
+    // session-token call default (12 hours) so MFA isn't re-prompted often.
+    //
+    const sessionDuration =
+      options.roleArn != null ? undefined : options.duration;
+
+    let keys = get1pAwsKeys(options);
+    let creds: Credentials | undefined;
+
+    for (let i = 0; i < 2 && creds == null; i++) {
       try {
-        maybeCreds = await getNewSessionCredentials(options, keys);
+        creds = await fetchSessionToken(keys, sessionDuration);
       } catch (e) {
-        if (!isInvalidMfaError(e) || i > 0) {
-          throw e;
-        }
+        if (!isInvalidMfaError(e) || i > 0) throw e;
 
-        //
-        // If the credential process was called multiple times quickly, it might have tried to re-use
-        // the same one-time code. Wait for it to cycle then try again.
-        //
         const pauseSeconds = getTotpSecondsRemaining() + 3;
         logger.warn(
           `Invalid MFA code on first attempt. Pausing for ${pauseSeconds} seconds to try again in case of reuse.`,
@@ -307,16 +350,80 @@ async function generateCredentials(options: AuthenticateOptions) {
         await new Promise((resolve) =>
           setTimeout(resolve, pauseSeconds * 1000),
         );
+        keys = get1pAwsKeys(options);
       }
     }
 
-    assert.ok(maybeCreds != null);
-    await writeFile(
-      getCacheFilename(options),
-      JSON.stringify(maybeCreds, null, 2),
-    );
-    return maybeCreds;
+    assert.ok(creds != null);
+    await writeCachedCredentials(cacheFile, creds);
+    return creds;
   });
+}
+
+async function getOrFetchRoleCredentials(
+  options: AuthenticateOptions,
+): Promise<CachedCredentials | Credentials> {
+  assert.ok(options.roleArn);
+
+  const cacheFile = getRoleCacheFilename(options);
+
+  if (options.cache) {
+    const cached = await readCachedCredentials(cacheFile);
+    if (cached) return cached;
+  } else {
+    logger.debug("Skipping role cache");
+  }
+
+  //
+  // We need to mint role credentials. Decide what to assume from:
+  //   - if a session-creds cache hit exists, use those (no 1P read needed)
+  //   - otherwise read 1P to learn whether MFA is configured;
+  //     - with MFA: go through the session-creds path (locked, cached) so MFA
+  //       is amortised across all roles assumed from this user
+  //     - without MFA: AssumeRole directly with long-term keys (no chained-call
+  //       1-hour cap, lockless)
+  //
+  let baseCreds: BaseCreds;
+
+  const cachedSession = options.cache
+    ? await readCachedCredentials(getSessionCacheFilename(options))
+    : undefined;
+
+  if (cachedSession) {
+    baseCreds = {
+      accessKeyId: cachedSession.AccessKeyId,
+      secretAccessKey: cachedSession.SecretAccessKey,
+      sessionToken: cachedSession.SessionToken,
+    };
+  } else {
+    const keys = get1pAwsKeys(options);
+    if (keys.mfaSerial == null) {
+      baseCreds = {
+        accessKeyId: keys.accessKeyId,
+        secretAccessKey: keys.secretAccessKey,
+      };
+    } else {
+      const session = await getOrFetchSessionCredentials(options);
+      baseCreds = {
+        accessKeyId: session.AccessKeyId!,
+        secretAccessKey: session.SecretAccessKey!,
+        sessionToken: session.SessionToken!,
+      };
+    }
+  }
+
+  const creds = await fetchAssumedRole(baseCreds, options);
+  await writeCachedCredentials(cacheFile, creds);
+  return creds;
+}
+
+async function generateCredentials(options: AuthenticateOptions) {
+  logger.info(`Generating credentials`, options);
+
+  const creds =
+    options.roleArn != null
+      ? await getOrFetchRoleCredentials(options)
+      : await getOrFetchSessionCredentials(options);
 
   console.log(
     JSON.stringify(
