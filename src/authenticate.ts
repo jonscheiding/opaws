@@ -8,12 +8,12 @@ import op, { Item } from "@1password/op-js";
 import { Credentials, STS, STSServiceException } from "@aws-sdk/client-sts";
 import { Command } from "@commander-js/extra-typings";
 import { keyBy } from "lodash-es";
-import notifier from "node-notifier";
 import timestring from "timestring";
 import { z } from "zod";
 
 import { withLock } from "./lock.js";
 import { configureDebugLogging, LOG_FILENAME, logger } from "./logger.js";
+import { notify } from "./notifier.js";
 import { isFileNotFoundError, sanitizeFilename } from "./util.js";
 
 type AwsKeys = {
@@ -411,23 +411,18 @@ async function authenticate(options: AuthenticateOptions) {
     logger.error(e);
 
     if (!process.stdout.isTTY) {
-      notifier.on("click", () => {
-        exec(`open ${LOG_FILENAME}`).unref();
-        process.exit(1);
-      });
-
-      notifier.on("timeout", () => process.exit(1));
-
-      notifier.notify({
+      const result = await notify({
+        title: "OPAWS",
         message:
           (e instanceof Error ? e.message : undefined) ??
           "Error generating credentials",
-        title: "OPAWS",
-        actions: "View Log",
-        wait: true,
+        actions: ["View Log"],
       });
-    } else {
-      process.exit(1);
+
+      if (result?.kind === "action" && result.action === "View Log") {
+        exec(`open ${LOG_FILENAME}`).unref();
+      }
     }
+    process.exit(1);
   }
 }

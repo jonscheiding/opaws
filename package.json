@@ -28,7 +28,6 @@
     "husky": "^9.1.6",
     "lint-staged": "^15.2.10",
     "lodash-es": "^4.17.21",
-    "node-notifier": "^10.0.1",
     "prettier": "^3.3.3",
     "timestring": "^7.0.0",
     "triple-beam": "^1.4.1",
@@ -43,7 +42,6 @@
     "@types/ini": "^4.1.1",
     "@types/lodash-es": "^4",
     "@types/node": "^22.7.7",
-    "@types/node-notifier": "^8.0.5",
     "@types/timestring": "^7",
     "globals": "^15.11.0"
   }

@@ -40,7 +40,15 @@ credential_process=opaws --op-item "My Item Name"
 
 ### Notifications
 
-When used outside a TTY, `opaws` will send notifications to your Notification Center. To ensure this works and appropriate permissions are granted, run:
+When used outside a TTY, `opaws` will send notifications to your Notification Center via [`alerter`](https://github.com/vjeantet/alerter). Install it with:
+
+```
+$ brew install vjeantet/tap/alerter
+```
+
+If `alerter` is not installed, notifications are silently skipped.
+
+To verify the notification system is working and grant any required permissions, run:
 
 ```
 $ opaws util notify
