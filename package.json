@@ -23,7 +23,6 @@
     "@aws-sdk/client-sts": "^3.758.0",
     "@commander-js/extra-typings": "^13.1.0",
     "commander": "^13.1.0",
-    "cross-process-lock": "^2.1.1",
     "eslint": "^9.13.0",
     "eslint-plugin-import": "^2.31.0",
     "husky": "^9.1.6",

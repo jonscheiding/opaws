@@ -29,7 +29,11 @@ export const command = new Command("clear")
       const lockFiles = entries.filter(
         (e) => e === "opaws.lock" || e.startsWith("opaws-lock-"),
       );
-      await Promise.all(lockFiles.map((file) => rm(join(tmpdir(), file))));
+      await Promise.all(
+        lockFiles.map((file) =>
+          rm(join(tmpdir(), file), { recursive: true, force: true }),
+        ),
+      );
       console.log(`Removed ${lockFiles.length} lock files.`);
     }
   });

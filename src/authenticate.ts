@@ -1,5 +1,4 @@
 import { exec } from "child_process";
-import { closeSync, openSync } from "fs";
 import { readFile, rename, writeFile } from "fs/promises";
 import assert from "node:assert";
 import { tmpdir } from "os";
@@ -8,12 +7,12 @@ import { join } from "path";
 import op, { Item } from "@1password/op-js";
 import { Credentials, STS, STSServiceException } from "@aws-sdk/client-sts";
 import { Command } from "@commander-js/extra-typings";
-import { lock, LockCallback } from "cross-process-lock";
 import { keyBy } from "lodash-es";
 import notifier from "node-notifier";
 import timestring from "timestring";
 import { z } from "zod";
 
+import { withLock } from "./lock.js";
 import { configureDebugLogging, LOG_FILENAME, logger } from "./logger.js";
 import { isFileNotFoundError, sanitizeFilename } from "./util.js";
 
@@ -153,32 +152,14 @@ function getRoleCacheFilename(options: AuthenticateOptions) {
   );
 }
 
-function getSessionLockFilename(options: AuthenticateOptions) {
-  return tmpFile(
+function getSessionLockDirectory(options: AuthenticateOptions) {
+  const key = [
     "opaws-lock-session",
-    [options.opAccount, options.opVault, options.opItem],
-    "lock",
-  );
-}
-
-async function withLock<T>(lockFile: string, callback: LockCallback<T>) {
-  //
-  // ensure lock file exists - cross-process-lock doesn't create it for you
-  // open with "a" rather than "w" to avoid truncating a file that may currently
-  // be involved in another process's lock state
-  //
-  closeSync(openSync(lockFile, "a"));
-
-  logger.debug(`Acquiring lock`, { lockFile });
-  const release = await lock(lockFile, { lockTimeout: 60000 });
-  logger.debug(`Lock acquired`, { lockFile });
-
-  try {
-    return await callback();
-  } finally {
-    release();
-    logger.debug(`Lock released`, { lockFile });
-  }
+    options.opAccount ?? "default",
+    options.opVault ?? "default",
+    options.opItem,
+  ].join("-");
+  return join(tmpdir(), sanitizeFilename(key));
 }
 
 async function readCachedCredentials(
@@ -315,7 +296,7 @@ async function getOrFetchSessionCredentials(
     logger.debug("Skipping session cache");
   }
 
-  return withLock(getSessionLockFilename(options), async () => {
+  return withLock(getSessionLockDirectory(options), async () => {
     //
     // Re-check after acquiring the lock: a concurrent process may have
     // populated the cache while we were waiting.
@@ -375,42 +356,21 @@ async function getOrFetchRoleCredentials(
   }
 
   //
-  // We need to mint role credentials. Decide what to assume from:
-  //   - if a session-creds cache hit exists, use those (no 1P read needed)
-  //   - otherwise read 1P to learn whether MFA is configured;
-  //     - with MFA: go through the session-creds path (locked, cached) so MFA
-  //       is amortised across all roles assumed from this user
-  //     - without MFA: AssumeRole directly with long-term keys (no chained-call
-  //       1-hour cap, lockless)
+  // Always go through the session-creds path. This serialises the 1P read
+  // behind the session lock, so concurrent invocations for different roles
+  // under the same IAM user trigger at most one Touch ID prompt rather than
+  // one per profile.
   //
-  let baseCreds: BaseCreds;
-
-  const cachedSession = options.cache
-    ? await readCachedCredentials(getSessionCacheFilename(options))
-    : undefined;
-
-  if (cachedSession) {
-    baseCreds = {
-      accessKeyId: cachedSession.AccessKeyId,
-      secretAccessKey: cachedSession.SecretAccessKey,
-      sessionToken: cachedSession.SessionToken,
-    };
-  } else {
-    const keys = get1pAwsKeys(options);
-    if (keys.mfaSerial == null) {
-      baseCreds = {
-        accessKeyId: keys.accessKeyId,
-        secretAccessKey: keys.secretAccessKey,
-      };
-    } else {
-      const session = await getOrFetchSessionCredentials(options);
-      baseCreds = {
-        accessKeyId: session.AccessKeyId!,
-        secretAccessKey: session.SecretAccessKey!,
-        sessionToken: session.SessionToken!,
-      };
-    }
-  }
+  // Tradeoff: AssumeRole chained from a session token is hard-capped at 1
+  // hour by AWS. The credential_process gets re-invoked on expiry, so this
+  // is transparent in normal use.
+  //
+  const session = await getOrFetchSessionCredentials(options);
+  const baseCreds: BaseCreds = {
+    accessKeyId: session.AccessKeyId!,
+    secretAccessKey: session.SecretAccessKey!,
+    sessionToken: session.SessionToken!,
+  };
 
   const creds = await fetchAssumedRole(baseCreds, options);
   await writeCachedCredentials(cacheFile, creds);
